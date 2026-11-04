@@ -68,8 +68,8 @@ public:
     t_cfg.freq = 2500000;
     t_cfg.x_min = 200;
     t_cfg.x_max = 3800;
-    t_cfg.y_min = 200;
-    t_cfg.y_max = 3800;
+    t_cfg.y_min = 3800;
+    t_cfg.y_max = 200;
     _touch_instance.config(t_cfg);
     _panel_instance.setTouch(&_touch_instance);
 
