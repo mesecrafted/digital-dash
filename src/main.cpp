@@ -12,18 +12,37 @@
 #define LED_GREEN 16
 #define LED_BLUE 17
 
+// OBD-II Mode 1 PIDs
+#define PID_CALC_LOAD 0x04
+#define PID_COOLANT_TEMP 0x05
+#define PID_MAP_PRESS 0x0B
+#define PID_TIMING_ADV 0x0E
+#define PID_FUEL_STATUS 0x03
+#define PID_BATT_VOLT 0x42
+
+// Telemetry Data Variables
+float battVoltage = 0.0;
+int coolantTemp = 0;
+int mapPressure = 0;
+float timingAdvance = 0.0;
+float engineLoad = 0.0;
+String fuelStatusStr = "Initializing...";
+bool ecuConnected = false;
+unsigned long lastResponseTime = 0;
+
+// Polling sequence state machine
+const uint8_t pidList[] = {PID_BATT_VOLT, PID_COOLANT_TEMP, PID_MAP_PRESS, PID_TIMING_ADV, PID_CALC_LOAD, PID_FUEL_STATUS};
+const int numPids = 6;
+int currentPidIndex = 0;
+unsigned long lastPollTime = 0;
+const unsigned long pollInterval = 100; // Poll a PID every 100ms
+
 void setupCAN() {
-  // Configure TWAI general settings
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(
       CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
-  
-  // Set automotive standard 500 kbps speed
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
-  
-  // Accept all incoming CAN frames (no filtering yet)
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-  // Install and start the driver
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
     if (twai_start() == ESP_OK) {
       Serial.println("TWAI Driver started successfully!");
@@ -107,100 +126,183 @@ public:
 
 LGFX lcd;
 
-// LED States
-bool redState = false;
-bool greenState = false;
-bool blueState = false;
-
-void drawUI() {
+void drawStaticLabels() {
   lcd.fillScreen(TFT_BLACK);
 
-  // Title
+  // Title Header
   lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   lcd.setTextSize(2);
-  lcd.setCursor(40, 20);
-  lcd.println("CYD RGB LED Controller");
+  lcd.setCursor(20, 15);
+  lcd.println("VEHICLE TELEMETRY DASH");
 
-  // Draw Red Button
-  lcd.fillRect(40, 80, 240, 80, redState ? TFT_RED : 0x4000);
-  lcd.drawRect(40, 80, 240, 80, TFT_WHITE);
-  lcd.setTextColor(TFT_WHITE, redState ? TFT_RED : 0x4000);
-  lcd.setCursor(110, 110);
-  lcd.print(redState ? "RED: ON" : "RED: OFF");
+  // Static Field Labels (drawn once)
+  lcd.setTextSize(2);
+  lcd.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  
+  lcd.setCursor(20, 80);
+  lcd.print("Battery: ");
 
-  // Draw Green Button
-  lcd.fillRect(40, 190, 240, 80, greenState ? TFT_GREEN : 0x0200);
-  lcd.drawRect(40, 190, 240, 80, TFT_WHITE);
-  lcd.setTextColor(TFT_WHITE, greenState ? TFT_GREEN : 0x0200);
-  lcd.setCursor(95, 220);
-  lcd.print(greenState ? "GREEN: ON" : "GREEN: OFF");
+  lcd.setCursor(20, 140);
+  lcd.print("Coolant Temp: ");
 
-  // Draw Blue Button
-  lcd.fillRect(40, 300, 240, 80, blueState ? TFT_BLUE : 0x0010);
-  lcd.drawRect(40, 300, 240, 80, TFT_WHITE);
-  lcd.setTextColor(TFT_WHITE, blueState ? TFT_BLUE : 0x0010);
-  lcd.setCursor(100, 330);
-  lcd.print(blueState ? "BLUE: ON" : "BLUE: OFF");
+  lcd.setCursor(20, 200);
+  lcd.print("MAP Pressure: ");
+
+  lcd.setCursor(20, 260);
+  lcd.print("Ign Timing: ");
+
+  lcd.setCursor(20, 320);
+  lcd.print("Calc Load: ");
+
+  lcd.setCursor(20, 390);
+  lcd.setTextSize(1);
+  lcd.println("Fuel System Status:");
 }
 
-void updateHardwareLEDs() {
-  digitalWrite(LED_RED, redState ? LOW : HIGH);
-  digitalWrite(LED_GREEN, greenState ? LOW : HIGH);
-  digitalWrite(LED_BLUE, blueState ? LOW : HIGH);
+void updateTelemetryDisplay() {
+  // 1. Connection Status Bar (Top)
+  lcd.fillRect(20, 45, 280, 16, TFT_BLACK); // Clear old status text area
+  lcd.setTextSize(1);
+  lcd.setCursor(20, 45);
+  if (ecuConnected) {
+    lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+    lcd.print("STATUS: CONNECTED TO ECU");
+  } else {
+    lcd.setTextColor(TFT_RED, TFT_BLACK);
+    lcd.print("STATUS: SEARCHING / NO SIGNAL...");
+  }
+
+  // 2. Update Dynamic Values (Overwriting text cleanly without full-screen clear)
+  lcd.setTextSize(2);
+
+  // Battery Voltage
+  lcd.fillRect(140, 80, 160, 20, TFT_BLACK);
+  lcd.setCursor(140, 80);
+  lcd.setTextColor(TFT_YELLOW, TFT_BLACK);
+  lcd.printf("%.1f V", battVoltage);
+
+  // Coolant Temperature
+  lcd.fillRect(180, 140, 120, 20, TFT_BLACK);
+  lcd.setCursor(180, 140);
+  lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  lcd.printf("%d C", coolantTemp);
+
+  // MAP Pressure
+  lcd.fillRect(180, 200, 120, 20, TFT_BLACK);
+  lcd.setCursor(180, 200);
+  lcd.setTextColor(TFT_ORANGE, TFT_BLACK);
+  lcd.printf("%d kPa", mapPressure);
+
+  // Ignition Timing
+  lcd.fillRect(160, 260, 140, 20, TFT_BLACK);
+  lcd.setCursor(160, 260);
+  lcd.setTextColor(TFT_MAGENTA, TFT_BLACK);
+  lcd.printf("%.1f deg", timingAdvance);
+
+  // Calculated Load
+  lcd.fillRect(150, 320, 150, 20, TFT_BLACK);
+  lcd.setCursor(150, 320);
+  lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+  lcd.printf("%.1f %%", engineLoad);
+
+  // Fuel System Status
+  lcd.fillRect(20, 415, 280, 30, TFT_BLACK);
+  lcd.setCursor(20, 415);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.print(fuelStatusStr);
+}
+
+void sendOBDRequest(uint8_t pid) {
+  twai_message_t tx_frame;
+  tx_frame.identifier = 0x7DF; // Standard OBD-II functional request ID
+  tx_frame.extd = 0;
+  tx_frame.data_length_code = 8;
+  tx_frame.data[0] = 0x02;     // 2 data bytes follow
+  tx_frame.data[1] = 0x01;     // Mode 1: Current powertrain diagnostic data
+  tx_frame.data[2] = pid;      // Requested PID
+  tx_frame.data[3] = 0x55;     // Padding
+  tx_frame.data[4] = 0x55;
+  tx_frame.data[5] = 0x55;
+  tx_frame.data[6] = 0x55;
+  tx_frame.data[7] = 0x55;
+
+  twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+}
+
+void parseOBDResponse(twai_message_t &rx) {
+  if (rx.identifier >= 0x7E8 && rx.identifier <= 0x7EF) {
+    if (rx.data[1] == 0x41) { // Positive response to Mode 1
+      uint8_t pid = rx.data[2];
+      ecuConnected = true;
+      lastResponseTime = millis();
+
+      switch (pid) {
+        case PID_BATT_VOLT:
+          battVoltage = ((float)((rx.data[3] * 256) + rx.data[4])) / 1000.0;
+          break;
+        case PID_COOLANT_TEMP:
+          coolantTemp = (int)rx.data[3] - 40;
+          break;
+        case PID_MAP_PRESS:
+          mapPressure = (int)rx.data[3];
+          break;
+        case PID_TIMING_ADV:
+          timingAdvance = ((float)rx.data[3] - 128.0) / 2.0;
+          break;
+        case PID_CALC_LOAD:
+          engineLoad = ((float)rx.data[3] * 100.0) / 255.0;
+          break;
+        case PID_FUEL_STATUS:
+          switch (rx.data[3]) {
+            case 1: fuelStatusStr = "Open: Low Temp"; break;
+            case 2: fuelStatusStr = "Closed: O2 Active"; break;
+            case 4: fuelStatusStr = "Open: Open Loop / Fault"; break;
+            case 8: fuelStatusStr = "Closed: O2 Fault"; break;
+            default: fuelStatusStr = "Open / Other"; break;
+          }
+          break;
+      }
+    }
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(500); // Allow power rails to stabilize
+  delay(500);
 
-  // Initialize LED pins
-  pinMode(LED_RED, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_BLUE, OUTPUT);
-  digitalWrite(LED_RED, HIGH);
-  digitalWrite(LED_GREEN, HIGH);
-  digitalWrite(LED_BLUE, HIGH);
-
-  // Initialize Display and Touch safely
   lcd.init();
   delay(100);
   lcd.setRotation(0);
   lcd.setBrightness(128);
 
-  drawUI();
+  drawStaticLabels(); // Draw static background layout once
   setupCAN();
 }
 
 void loop() {
-  int32_t x, y;
-  if (lcd.getTouch(&x, &y)) {
-    delay(200); // Debounce
-
-    if (x >= 40 && x <= 280 && y >= 80 && y <= 160) {
-      redState = !redState;
-      updateHardwareLEDs();
-      drawUI();
-    }
-    else if (x >= 40 && x <= 280 && y >= 190 && y <= 270) {
-      greenState = !greenState;
-      updateHardwareLEDs();
-      drawUI();
-    }
-    else if (x >= 40 && x <= 280 && y >= 300 && y <= 380) {
-      blueState = !blueState;
-      updateHardwareLEDs();
-      drawUI();
-    }
+  // 1. Sequentially request OBD-II PIDs
+  if (millis() - lastPollTime >= pollInterval) {
+    lastPollTime = millis();
+    sendOBDRequest(pidList[currentPidIndex]);
+    currentPidIndex = (currentPidIndex + 1) % numPids;
   }
-  // Poll for incoming CAN bus messages (0ms timeout for non-blocking read)
+
+  // 2. Read incoming CAN bus frames non-blocking
   twai_message_t rx_frame;
-  if (twai_receive(&rx_frame, 0) == ESP_OK) {
-    Serial.printf("CAN ID: 0x%03X | Flags: %d | DLC: %d | Data: ", 
-                  rx_frame.identifier, rx_frame.extd, rx_frame.data_length_code);
-    
-    for (int i = 0; i < rx_frame.data_length_code; i++) {
-      Serial.printf("%02X ", rx_frame.data[i]);
-    }
-    Serial.println();
+  while (twai_receive(&rx_frame, 0) == ESP_OK) {
+    parseOBDResponse(rx_frame);
+  }
+
+  // 3. Timeout check for ECU connection status (loss of signal after 2 seconds)
+  bool previousConnectionState = ecuConnected;
+  if (millis() - lastResponseTime > 2000) {
+    ecuConnected = false;
+  }
+
+  // Refresh telemetry numbers smoothly every 250ms without screen clearing
+  static unsigned long lastRedraw = 0;
+  if (millis() - lastRedraw >= 250 || (previousConnectionState != ecuConnected)) {
+    lastRedraw = millis();
+    updateTelemetryDisplay();
   }
 }
