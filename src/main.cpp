@@ -1,11 +1,39 @@
 #include <Arduino.h>
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
+#include "driver/twai.h"
+
+// Define CAN pins to match your port
+#define CAN_TX_PIN GPIO_NUM_32
+#define CAN_RX_PIN GPIO_NUM_25
 
 // Define RGB LED Pins (Common Anode: LOW = ON, HIGH = OFF)
 #define LED_RED 22
 #define LED_GREEN 16
 #define LED_BLUE 17
+
+void setupCAN() {
+  // Configure TWAI general settings
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(
+      CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
+  
+  // Set automotive standard 500 kbps speed
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+  
+  // Accept all incoming CAN frames (no filtering yet)
+  twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  // Install and start the driver
+  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+    if (twai_start() == ESP_OK) {
+      Serial.println("TWAI Driver started successfully!");
+    } else {
+      Serial.println("Failed to start TWAI driver.");
+    }
+  } else {
+    Serial.println("Failed to install TWAI driver.");
+  }
+}
 
 // Custom LovyanGFX configuration for the Freenove 4.0" ESP32-32E Display
 class LGFX : public lgfx::LGFX_Device {
@@ -140,6 +168,7 @@ void setup() {
   lcd.setBrightness(128);
 
   drawUI();
+  setupCAN();
 }
 
 void loop() {
@@ -162,5 +191,16 @@ void loop() {
       updateHardwareLEDs();
       drawUI();
     }
+  }
+  // Poll for incoming CAN bus messages (0ms timeout for non-blocking read)
+  twai_message_t rx_frame;
+  if (twai_receive(&rx_frame, 0) == ESP_OK) {
+    Serial.printf("CAN ID: 0x%03X | Flags: %d | DLC: %d | Data: ", 
+                  rx_frame.identifier, rx_frame.extd, rx_frame.data_length_code);
+    
+    for (int i = 0; i < rx_frame.data_length_code; i++) {
+      Serial.printf("%02X ", rx_frame.data[i]);
+    }
+    Serial.println();
   }
 }
