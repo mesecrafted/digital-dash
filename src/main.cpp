@@ -4,8 +4,8 @@
 #include "driver/twai.h"
 
 // Define CAN pins to match your port
-#define CAN_TX_PIN GPIO_NUM_32
-#define CAN_RX_PIN GPIO_NUM_25
+#define CAN_TX_PIN GPIO_NUM_21
+#define CAN_RX_PIN GPIO_NUM_35
 
 // Define RGB LED Pins (Common Anode: LOW = ON, HIGH = OFF)
 #define LED_RED 22
@@ -38,19 +38,24 @@ unsigned long lastPollTime = 0;
 const unsigned long pollInterval = 100; // Poll a PID every 100ms
 
 void setupCAN() {
+  // Change to TWAI_MODE_LISTEN_ONLY so it never transmits and never triggers bus-off
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(
-      CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
+      CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_LISTEN_ONLY);
+  
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-    if (twai_start() == ESP_OK) {
-      Serial.println("TWAI Driver started successfully!");
-    } else {
-      Serial.println("Failed to start TWAI driver.");
-    }
+    Serial.println("TWAI Driver installed successfully (Listen Only).");
   } else {
     Serial.println("Failed to install TWAI driver.");
+    return;
+  }
+
+  if (twai_start() == ESP_OK) {
+    Serial.println("TWAI Driver started. Listening...");
+  } else {
+    Serial.println("Failed to start TWAI driver.");
   }
 }
 
@@ -214,19 +219,25 @@ void updateTelemetryDisplay() {
 
 void sendOBDRequest(uint8_t pid) {
   twai_message_t tx_frame;
-  tx_frame.identifier = 0x7DF; // Standard OBD-II functional request ID
-  tx_frame.extd = 0;
+  tx_frame.identifier = 0x7DF; // Broadcast request ID
+  tx_frame.extd = 0;           // Standard 11-bit frame
+  tx_frame.rtr = 0;            // Data frame
   tx_frame.data_length_code = 8;
-  tx_frame.data[0] = 0x02;     // 2 data bytes follow
-  tx_frame.data[1] = 0x01;     // Mode 1: Current powertrain diagnostic data
-  tx_frame.data[2] = pid;      // Requested PID
-  tx_frame.data[3] = 0x55;     // Padding
+  
+  tx_frame.data[0] = 0x02;     // Length: 2 bytes coming (Mode + PID)
+  tx_frame.data[1] = 0x01;     // Mode 1: Current data
+  tx_frame.data[2] = pid;      // Target PID
+  tx_frame.data[3] = 0x55;     // Padding bytes (can be 0x00 or 0x55)
   tx_frame.data[4] = 0x55;
   tx_frame.data[5] = 0x55;
   tx_frame.data[6] = 0x55;
   tx_frame.data[7] = 0x55;
 
-  twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+  esp_err_t result = twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+  if (result != ESP_OK) {
+    // Transmission failed or queue is full
+    // Check if error counters are spiking
+  }
 }
 
 void parseOBDResponse(twai_message_t &rx) {
@@ -235,6 +246,13 @@ void parseOBDResponse(twai_message_t &rx) {
       uint8_t pid = rx.data[2];
       ecuConnected = true;
       lastResponseTime = millis();
+      //if (twai_receive(&rx_frame, pdMS_TO_TICKS(10)) == ESP_OK) {
+        //Serial.printf("RAW ID: 0x%03X | DLC: %d | Data:", rx_frame.identifier, rx_frame.data_length_code);
+        //for (int i = 0; i < rx_frame.data_length_code; i++) {
+          //Serial.printf(" %02X", rx_frame.data[i]);
+        //}
+        //Serial.println();
+      //}
 
       switch (pid) {
         case PID_BATT_VOLT:
@@ -266,6 +284,16 @@ void parseOBDResponse(twai_message_t &rx) {
   }
 }
 
+void checkAndRecoverBus() {
+  twai_status_info_t status;
+  twai_get_status_info(&status);
+
+  if (status.state == TWAI_STATE_BUS_OFF) {
+    Serial.println("Bus-off detected! Initiating recovery...");
+    twai_initiate_recovery(); // Resets error counters and brings controller back online
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -290,10 +318,18 @@ void loop() {
   // 2. Read incoming CAN bus frames non-blocking
   twai_message_t rx_frame;
   while (twai_receive(&rx_frame, 0) == ESP_OK) {
+    Serial.printf("RAW RX ID: 0x%03X | Data: ", rx_frame.identifier);
+    for (int i = 0; i < rx_frame.data_length_code; i++) {
+      Serial.printf("%02X ", rx_frame.data[i]);
+    }
+    Serial.println();
     parseOBDResponse(rx_frame);
   }
 
-  // 3. Timeout check for ECU connection status (loss of signal after 2 seconds)
+  // 3. Regularly check for and recover from Bus-Off errors
+  checkAndRecoverBus();
+
+  // 4. Timeout check for ECU connection status (loss of signal after 2 seconds)
   bool previousConnectionState = ecuConnected;
   if (millis() - lastResponseTime > 2000) {
     ecuConnected = false;
